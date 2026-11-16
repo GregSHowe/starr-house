@@ -5450,6 +5450,9 @@ if(RAIN&&typeof SOUND_SRC!=='undefined'){
         else sN.connect(g);
         g.connect(ctx.destination); sN.start(0, Math.random()*sN.buffer.duration*0.8); AU.g[k]=g; }
       AU.on=true; }
+    // (16 Nov, Rufus's log: a second tap while the sounds were still being read switched it "on" with the fire not yet
+    // there, and the frame's own line fell over on it. A tap before they are all read is ignored)
+    else if(AU.on===undefined) return;
     else { AU.on=!AU.on; if(AU.on) AU.ctx.resume(); else AU.ctx.suspend(); }
     bt.textContent='Sound: '+(AU.on?'on':'off'); };
 }
@@ -5604,7 +5607,7 @@ let last=performance.now();
 // WALKING THE HOUSE: the floor under the feet is whichever of the map's floors meets them (a stair's ramp first,
 // so a stair climbs); no floor within a step, or a ceiling too low to pass, and the way is shut; the eye
 // stoops under the lean-to's roof
-let feet=0, eyeH=1.58;
+let feet=0, eyeH=1.58, CLIMB=1, CREF=0, CARRY=null, TOPPED=null;   // (CLIMB: the way last gone on a stair, up 1 or down -1; TOPPED: the thumb's way when a stair's assist reached its head)
 function fAt(g,x,z){ if(g.h!==undefined) return g.h; if(g.pl) return g.pl[0]+g.pl[1]*x+g.pl[2]*z;
   // a turn of winders: the height climbs with the angle round the pivot (fault E60)
   if(g.pv){ let d=Math.atan2(z-g.pv[1],x-g.pv[0])-g.a0; d=Math.atan2(Math.sin(d),Math.cos(d)); const t=Math.max(0,Math.min(1,d/(g.a1-g.a0))); return g.h0+(g.h1-g.h0)*t; }
@@ -5612,24 +5615,89 @@ function fAt(g,x,z){ if(g.h!==undefined) return g.h; if(g.pl) return g.pl[0]+g.p
 function standAt(x,z,tol){ let best=null,bd=1e9;
   for(const q of CFG.walk){ const r=q.r; if(x<r[0]||x>r[1]||z<r[2]||z>r[3]) continue;
     const f=fAt(q.f,x,z), c=fAt(q.c,x,z), d=Math.abs(f-feet); if(d>tol||c-f<(q.k==='ramp'?0.9:1.05)) continue;
-    const sc=d-(q.k==='ramp'?0.3:0); if(sc<bd){bd=sc;best={f,c,n:q.n};} }
+    const sc=d-(q.k==='ramp'?0.3:0); if(sc<bd){bd=sc;best={f,c,n:q.n,k:q.k};} }
   return best; }
 function walkTo(nx,nz,dt){ const ox=eye.x-(nx-eye.x)*0, oz=eye.z;
   let st=standAt(nx,nz,0.45), x=nx, z=nz;
+  // THE REST AT THE HEAD OF A STAIR (16 Nov): carried up a stair by its assist, a thumb still held the same way walked
+  // straight back down it, for from the landing that way lies the stair (stair_probe.js "north 9s" went up and came
+  // down). Carried to the top, the walker rests there until the thumb turns a sixth of a turn or lets go
+  { const mv0=Math.hypot(nx-PX,nz-PZ);
+    // (and while a stair's assist is carrying the walker, the thumb unturned, a step that would undo the climb is not
+    // taken: at the winders' corner the step at the wall and the assist cancelled, frame about; stair_trace.js)
+    if(CARRY){ if(mv0<1e-6||((nx-PX)*CARRY[0]+(nz-PZ)*CARRY[1])/mv0<0.87) CARRY=null; else if(st&&(st.f-feet)*CLIMB<-0.0005) st=null; }
+    if(TOPPED){ if(mv0<1e-6||((nx-PX)*TOPPED[0]+(nz-PZ)*TOPPED[1])/mv0<0.87) TOPPED=null;
+      else if(!st||st.f<feet-0.002){ st=standAt(PX,PZ,9); x=PX; z=PZ; eye.x=x; eye.z=z; if(st) feet+=(st.f-feet)*Math.min(1,dt*14); eye.y=feet+eyeH; return; } } }
   // THE DOORWAY ASSIST (Greg, 13 Nov: "its crucial we dont make the architecture a barrier to exploration"):
   // walking into a wall within half a metre of a doorway at one's own floor, the step slides toward the
   // opening's middle instead of stopping, so a door is found by walking at it, not by aiming
   if(!st){ const mv=Math.hypot(nx-PX,nz-PZ);
     for(const q of CFG.walk){ if(q.k!=='door') continue; const r=q.r; if(Math.abs(fAt(q.f,0,0)-feet)>0.45) continue;
-      const cx=Math.max(r[0],Math.min(r[1],nx)), cz=Math.max(r[2],Math.min(r[3],nz)); if(Math.hypot(cx-nx,cz-nz)>0.5) continue;
+      const cx=Math.max(r[0],Math.min(r[1],nx)), cz=Math.max(r[2],Math.min(r[3],nz)), dd=Math.hypot(cx-nx,cz-nz);
+      // (16 Nov, after Rufus's iPad: in the front entry, a metre deep with a door either side, a thumb pushed at the
+      // side wall stood there, more than half a metre from the doorway; scratch steps_probe.js. The reach is a stride
+      // and a bit, 1.2 m, for a step that is heading nearer the doorway, and half a metre as before for any other)
+      // (and only for a step aimed at the doorway's own wall, a fifth of it or more through the wall toward the
+      // opening: a step along that wall, at the stair beside the door, was pulled back to the door and fought the
+      // stair's own assist; stair_probe.js "north 9s")
       const wide=(r[1]-r[0])<(r[3]-r[2]); const mid=wide?(r[0]+r[1])/2:(r[2]+r[3])/2;
+      const thru=wide?nz-PZ:nx-PX, toC=wide?(r[2]+r[3])/2-PZ:(r[0]+r[1])/2-PX;
+      if(thru*toC<=0||Math.abs(thru)<0.2*mv||dd>1.2) continue;
       const tx=wide?PX+Math.sign(mid-PX)*Math.min(Math.abs(mid-PX),mv):nx, tz=wide?nz:PZ+Math.sign(mid-PZ)*Math.min(Math.abs(mid-PZ),mv);
-      const s2=standAt(tx,tz,0.45); if(s2){ st=s2; x=tx; z=tz; break; } } }
+      let s2=standAt(tx,tz,0.45); if(s2){ st=s2; x=tx; z=tz; break; }
+      // (the slide alone, without the step into the wall: the step and the slide together could both be refused)
+      const ux=wide?tx:PX, uz=wide?PZ:tz; if(ux!==PX||uz!==PZ){ s2=standAt(ux,uz,0.45); if(s2){ st=s2; x=ux; z=uz; break; } } } }
+  // THE STEPS ASSIST (16 Nov; Rufus on his iPad: "The door opened, but I couldn't walk in"): the door's steps are a strip
+  // as wide as the door, 72 cm, and the doorway assist above does not reach down to the yard, two feet below the sill;
+  // a thumb's width off the middle and the walker stood against the foundation beside an open door (scratch
+  // thresh_probe.js: 45 cm aside, stuck). Walking at the house within a stride and a half of an outside door's steps,
+  // the step slides along the wall to them, and at them it goes up, whatever height of step is left
+  if(!st){ const mv=Math.hypot(nx-PX,nz-PZ);
+    for(const q of CFG.walk){ if(q.k!=='ramp'||!q.f.ax||q.n.length!==1||q.n[0]!=='outside'||feet<q.f.h0-0.45||feet>q.f.h1+0.1) continue;
+      const r=q.r, aX=q.f.ax==='x', a0=aX?r[2]:r[0], a1=aX?r[3]:r[1], mid=(a0+a1)/2, P=aX?PZ:PX, N=aX?nz:nx, nl=aX?nx:nz;
+      if(nl<(aX?r[0]:r[2])-0.6||nl>(aX?r[1]:r[3])+0.6||Math.abs(P-mid)>(a1-a0)/2+1.5) continue;
+      // (steering along the wall away from the door, more sideways than forward: left alone. Rufus's own approach was
+      // ten degrees off square, which is walking at the door, not away from it)
+      if((N-P)*(mid-P)<0&&Math.abs(N-P)>Math.abs(nl-(aX?PX:PZ))) continue;
+      if(P<a0+0.05||P>a1-0.05){ const t=P+Math.sign(mid-P)*Math.min(Math.abs(mid-P),mv), tx=aX?PX:t, tz=aX?t:PZ;
+        const s2=standAt(tx,tz,0.45); if(s2){ st=s2; x=tx; z=tz; break; } }
+      else { const cx=Math.max(r[0],Math.min(r[1],nx)), cz=Math.max(r[2],Math.min(r[3],nz)); const s2=standAt(cx,cz,0.75); if(s2){ st=s2; x=cx; z=cz; break; } } } }
+  // THE STAIR ASSIST (16 Nov, the same rule: "its crucial we dont make the architecture a barrier to exploration"). The
+  // front stair rises across the back of an entry a metre deep, its foot in the corner: walked at from the door, the
+  // walker met its side and stood (scratch stair_probe.js: "north 4s" stayed on the entry's floor). Walking into the
+  // side of a flight from the floor at its foot, the step slides along to the foot; on a flight or its winders,
+  // walking into the wall beside them, the step goes on along the stair the way the walker was last going (CLIMB)
+  if(!st){ const mv=Math.hypot(nx-PX,nz-PZ);
+    for(const q of CFG.walk){ if(q.k!=='ramp'||(q.n.length===1&&q.n[0]==='outside')) continue; const r=q.r, g=q.f;
+      const inP=PX>=r[0]-0.03&&PX<=r[1]+0.03&&PZ>=r[2]-0.03&&PZ<=r[3]+0.03, onIt=inP&&Math.abs(fAt(g,PX,PZ)-feet)<0.3;
+      if(g.ax){ const aX=g.ax==='x', up=Math.sign(g.a1-g.a0)*(g.h1>g.h0?1:-1);          // (the way up along its axis)
+        if(onIt){ const t=(aX?PX:PZ)+up*CLIMB*mv, tx=aX?t:PX, tz=aX?PZ:t; const s2=standAt(tx,tz,0.45); if(s2){ st=s2; x=tx; z=tz; if(mv>1e-6) CARRY=[(nx-PX)/mv,(nz-PZ)/mv]; break; } }
+        else { const lowA=g.h0<=g.h1?g.a0:g.a1, lowH=Math.min(g.h0,g.h1); if(Math.abs(lowH-feet)>0.3) continue;
+          if(nx<r[0]-0.3||nx>r[1]+0.3||nz<r[2]-0.3||nz>r[3]+0.3) continue;              // (walking at its side)
+          const P=aX?PX:PZ; if(Math.abs(lowA-P)<0.02) continue; const t=P+Math.sign(lowA-P)*Math.min(Math.abs(lowA-P),mv), tx=aX?t:PX, tz=aX?PZ:t;
+          const s2=standAt(tx,tz,0.45); if(s2){ st=s2; x=tx; z=tz; break; } } }
+      else if(g.pv&&onIt){ const rad=Math.hypot(PX-g.pv[0],PZ-g.pv[1]); if(rad<0.05) continue;
+        const up=Math.sign(g.a1-g.a0)*(g.h1>g.h0?1:-1), a=Math.atan2(PZ-g.pv[1],PX-g.pv[0])+up*CLIMB*mv/rad,
+          tx=Math.max(r[0],Math.min(r[1],g.pv[0]+rad*Math.cos(a))), tz=Math.max(r[2],Math.min(r[3],g.pv[1]+rad*Math.sin(a)));   // (round the pivot, kept within the stair's own walls)
+        const s2=standAt(tx,tz,0.45); if(s2){ st=s2; x=tx; z=tz; if(mv>1e-6) CARRY=[(nx-PX)/mv,(nz-PZ)/mv];
+          // (at the top, where a floor lies level with the stair's head: the rest)
+          // (and stood a hand's breadth onto that floor, clear of the winders: left at their edge, a step along the
+          // landing went down round the newel instead; stair_probe.js "north 9s, pause, west 4s")
+          if(CLIMB>0&&mv>1e-6&&s2.f>=Math.max(g.h0,g.h1)-0.01){ const w=CFG.walk.find((w)=>w.k==='floor'&&tx>=w.r[0]-0.25&&tx<=w.r[1]+0.25&&tz>=w.r[2]-0.25&&tz<=w.r[3]+0.25&&Math.abs(fAt(w.f,tx,tz)-s2.f)<0.05);
+            if(w){ TOPPED=[(nx-PX)/mv,(nz-PZ)/mv]; let fx=Math.max(w.r[0]+0.15,Math.min(w.r[1]-0.15,tx)), fz=Math.max(w.r[2]+0.15,Math.min(w.r[3]-0.15,tz));
+              const wx_=(w.r[0]+w.r[1])/2-fx, wz_=(w.r[2]+w.r[3])/2-fz, wl=Math.hypot(wx_,wz_)||1;
+              for(let k=0;k<14&&fx>r[0]-0.12&&fx<r[1]+0.12&&fz>r[2]-0.12&&fz<r[3]+0.12;k++){ fx+=wx_/wl*0.05; fz+=wz_/wl*0.05; }   // (toward the floor's middle, till clear of the stair)
+              const s3=standAt(fx,fz,0.45); if(s3&&s3.k==='floor'){ st=s3; x=fx; z=fz; } } }
+          break; } } } }
   if(!st){ st=standAt(nx,PZ,0.45); x=nx; z=PZ; }
   if(!st){ st=standAt(PX,nz,0.45); x=PX; z=nz; }
   if(!st){ st=standAt(PX,PZ,9); x=PX; z=PZ; }
   eye.x=x; eye.z=z; PX=x; PZ=z;
-  if(st){ feet+=(st.f-feet)*Math.min(1,dt*14); const want=Math.min(1.58,Math.max(0.95,st.c-st.f-0.16)); eyeH+=(want-eyeH)*Math.min(1,dt*6); }
+  // (the way last gone on a stair turns only on a hand's breadth of height, 12 cm: at the winders' corner a step at the
+  // wall dipped a centimetre before the assist lifted it, and the dip alone turned the walker round; stair_trace.js)
+  if(st&&st.k!=='ramp') CARRY=null;                                        // (off the stair, the carrying is over)
+  if(st){ if(st.f>CREF+0.12){ CLIMB=1; CREF=st.f; } else if(st.f<CREF-0.12){ CLIMB=-1; CREF=st.f; } else if(CLIMB>0?st.f>CREF:st.f<CREF) CREF=st.f;
+    feet+=(st.f-feet)*Math.min(1,dt*14); const want=Math.min(1.58,Math.max(0.95,st.c-st.f-0.16)); eyeH+=(want-eyeH)*Math.min(1,dt*6); }
   eye.y=feet+eyeH;
   if(CFG.light&&st&&st.n){ MT+=dt; if(MT>(METER_RAYS?0.12:0.25)){ MT=0; const L=METER_RAYS?meter():meterGPU(); WANT=L?Math.min(40,Math.max(0.06,Math.pow(0.15/L,0.8))):exposureFor(st.n);
       // (the brightest surface in view may just reach white, no further: highlights kept, as an eye keeps them)
@@ -5662,7 +5730,7 @@ function frame(t){ const dt=Math.min(0.05,(t-last)/1000); last=t;
     { const nd=0.2+0.8*K.day, nf=0.7+0.3*K.day; for(const u of FALL.veilU){ u.uCol.value.copy(FALL.U.uCol.value).multiplyScalar(nd); u.uFog.value.copy(FALL.U.uFog.value).multiplyScalar(nd); u.uSnowCol.value.copy(FALL.U.uSnowCol.value).multiplyScalar(nd); }
       FALL.U.uCol.value.multiplyScalar(nf); FALL.U.uSnowCol.value.multiplyScalar(nf); } if(CFG.walk){ FALL.U.uMin.value.set(eye.x-9,0,eye.z-9); FALL.U.uSpan.value.set(18,9.5,18); } }
   if(AU&&AU.on&&AU.g.rain){ let d=99; for(const f of CFG.fires) if(f.kind==='fire') d=Math.min(d,Math.hypot(eye.x-f.p[0],eye.z-f.p[2]));
-    AU.g.rain.gain.value=0.55*(1-K.snow); if(AU.g.wind) AU.g.wind.gain.value=1.2*K.snow; AU.g.fire.gain.value=Math.min(0.9,0.9/(0.6+d*0.45))*K.fire; }
+    AU.g.rain.gain.value=0.55*(1-K.snow); if(AU.g.wind) AU.g.wind.gain.value=1.2*K.snow; if(AU.g.fire) AU.g.fire.gain.value=Math.min(0.9,0.9/(0.6+d*0.45))*K.fire; }
   R.render(S,C); if(FPS) fpsTick(); requestAnimationFrame(frame); }
 // ?fps: the frame rate and the longest frame of the last second, in the corner (E73), so a slow machine shows its number
 const FPS=/[?&]fps/.test(location.search)?Object.assign(document.body.appendChild(document.createElement('div')),{id:'fps'}):null;
